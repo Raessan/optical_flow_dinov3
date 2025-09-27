@@ -1,0 +1,12 @@
+.ipynb_checkpoints/
+__pycache__/
+results/
+.vscode/
+
+build/
+*.engine.*
+
+*.egg-info/
+
+test_data/
+dinov3_weights/
