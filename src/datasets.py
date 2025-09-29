@@ -16,6 +16,16 @@ from src.frame_utils import read_gen
 from src.dataset_augmentor import FlowAugmentor
 from src.common import image_to_tensor
 
+def check_nan(name, arr):
+    if isinstance(arr, np.ndarray):
+        if np.isnan(arr).any():
+            print(f"{name} has NaNs")
+            return True
+    elif torch.is_tensor(arr):
+        if torch.isnan(arr).any():
+            print(f"{name} has NaNs")
+            return True
+    return False
 
 class FlowDataset(data.Dataset):
     def __init__(self, img_size, img_mean, img_std, aug_params=None):
@@ -48,6 +58,10 @@ class FlowDataset(data.Dataset):
 
         flow = read_gen(self.flow_list[index])
 
+        # After loading flow
+        if check_nan("flow initial", flow):
+            print("Index NaN: ", index)
+
         img1 = read_gen(self.image_list[index][0])
         img2 = read_gen(self.image_list[index][1])
 
@@ -71,15 +85,19 @@ class FlowDataset(data.Dataset):
         sx, sy = Wt / W, Ht / H
         flow[..., 0] *= sx
         flow[..., 1] *= sy
+        check_nan("flow after resize", flow)
 
         # Apply augmentor
         if self.augmentor is not None and np.random.rand() < self.prob_augment:
             img1, img2, flow = self.augmentor(img1, img2, flow)
 
+        check_nan("flow after augmentor", flow)
+
         img1 = image_to_tensor(img1, self.img_mean, self.img_std)
         img2 = image_to_tensor(img2, self.img_mean, self.img_std)
 
         flow = torch.from_numpy(flow).permute(2, 0, 1).float()
+        check_nan("flow tensor", flow)
 
         if valid is not None:
             valid = torch.from_numpy(valid)
@@ -108,6 +126,49 @@ class FlyingChairs(FlowDataset):
                 self.flow_list += [ flows[i] ]
                 self.image_list += [ [images[2*i], images[2*i+1]] ]
 
+class FlyingThings3D(FlowDataset):
+    def __init__(self, img_size, img_mean, img_std, aug_params=None, split='train', root='datasets/FlyingThings3D'):
+        super(FlyingThings3D, self).__init__(img_size, img_mean, img_std, aug_params)
+
+        flow_root = osp.join(root, split, 'flow')
+        image_root = osp.join(root, split, 'image_clean')
+
+        for cam in ['left']:
+            for direction in ['into_future', 'into_past']:
+                image_dirs = sorted(glob(osp.join(image_root, cam)))
+                flow_dirs = sorted(glob(osp.join(flow_root, cam, direction)))
+
+                for idir, fdir in zip(image_dirs, flow_dirs):
+                    images = sorted(glob(osp.join(idir, '*.png')) )
+                    flows = sorted(glob(osp.join(fdir, '*.flo')) )
+
+                    # Map frame index -> image path (expects zero-padded numeric stems, e.g., 0000123.png)
+                    idx2img = {}
+                    for img_path in images:
+                        stem = osp.splitext(osp.basename(img_path))[0]
+                        try:
+                            idx2img[int(stem)] = img_path
+                        except ValueError:
+                            # Skip non-numeric filenames
+                            continue
+
+                    # Build matched pairs
+                    for flow_path in flows:
+                        flow_stem = osp.splitext(osp.basename(flow_path))[0]
+                        try:
+                            k = int(flow_stem)
+                        except ValueError:
+                            continue
+
+                        if direction == 'into_future':
+                            i0, i1 = k, k + 1   # XXXXXXX.flo -> XXXXXXX.png, (XXXXXXX+1).png
+                        else:  # 'into_past'
+                            i0, i1 = k, k - 1   # XXXXXXX.flo -> XXXXXXX.png, (XXXXXXX-1).png
+
+                        if i0 in idx2img and i1 in idx2img:
+                            self.image_list += [[idx2img[i0], idx2img[i1]]]
+                            self.flow_list  += [flow_path]
+
 def fetch_dataset(dataset_name, dataset_locations, mode, img_size, img_mean, img_std, prob_augment=0.0):
     """ Create the data loader for the corresponding trainign set """
 
@@ -115,24 +176,29 @@ def fetch_dataset(dataset_name, dataset_locations, mode, img_size, img_mean, img
         aug_params = {'crop_size': img_size, 'min_scale': -0.1, 'max_scale': 1.0, 'do_flip': True, 'prob_augment': prob_augment}
         train_dataset = FlyingChairs(img_size, img_mean, img_std, aug_params, split=mode, root = dataset_locations[dataset_name])
 
+    elif dataset_name == 'flying_things_3d':
+        aug_params = {'crop_size': img_size, 'min_scale': -0.4, 'max_scale': 0.8, 'do_flip': True, 'prob_augment': prob_augment}
+        train_dataset = FlyingThings3D(img_size, img_mean, img_std, aug_params, split=mode, root = dataset_locations[dataset_name])
+
     return train_dataset
 
 if __name__ == "__main__":
     # Dataset variables
-    DATASET_NAME = 'flying_chairs' # Type of dataset
+    DATASET_NAME = "flying_things_3d" # Type of dataset
     DATASET_LOCATIONS = {
-        'flying_chairs': "/home/rafa/deep_learning/datasets/FlyingChairs_release/data"
+        'flying_chairs': "/home/rafa/deep_learning/datasets/FlyingChairs_release/data",
+        "flying_things_3d": "/home/rafa/deep_learning/datasets/FlyingThings3D_subset"
     }
     IMG_SIZE = (640, 640)
     IMG_MEAN = [0.485, 0.456, 0.406] # Mean of the image that the backbone (e.g. ResNet) expects
     IMG_STD = [0.229, 0.224, 0.225] # Std of the image that the backbone (e.g. ResNet) expects
-    PROB_AUGMENT = 1.0
+    PROB_AUGMENT = 0.0
     MODE = "train"
 
     dataset = fetch_dataset(DATASET_NAME, DATASET_LOCATIONS, MODE, IMG_SIZE, IMG_MEAN, IMG_STD, PROB_AUGMENT)
     from common import tensor_to_image
     from utils import flow_to_image
-    sample = dataset[0]
+    sample = dataset[5000]
     im1 = tensor_to_image(sample[0], IMG_MEAN, IMG_STD)
     im2 = tensor_to_image(sample[1], IMG_MEAN, IMG_STD)
     flow = sample[2]

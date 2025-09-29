@@ -1,7 +1,8 @@
 # Dataset variables
-DATASET_NAME = 'flying_chairs' # Type of dataset
+DATASET_NAME = 'flying_things_3d' # Type of dataset
 DATASET_LOCATIONS = {
-    'flying_chairs': "/home/rafa/deep_learning/datasets/FlyingChairs_release/data"
+    'flying_chairs': "/home/rafa/deep_learning/datasets/FlyingChairs_release/data",
+    "flying_things_3d": "/home/rafa/deep_learning/datasets/FlyingThings3D_subset"
 }
 IMG_SIZE = (640, 640) # Size of the image
 PATCH_SIZE = 16 # Patch size for the transformer embeddings
@@ -32,16 +33,16 @@ MODEL_TO_EMBED_DIM = { # Mapping from model type to embedding dimension
 }
 
 # TRAINING PARAMETERS
-BATCH_SIZE = 16 # Batch size
+BATCH_SIZE = 8 # Batch size
 
 LEARNING_RATE = 0.0001 # Learning rate
 WEIGHT_DECAY = 0.0001 # Weight decay for regularization
 NUM_EPOCHS = 100 # Number of epochs
 NUM_SAMPLES_PLOT = 3 # Number of samples to plot during training or validation
 
-LOAD_MODEL = False # Whether to load an existing model for training
+LOAD_MODEL = True # Whether to load an existing model for training
 SAVE_MODEL = True # Whether to save the result from the training
-MODEL_PATH_TRAIN_LOAD = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results' # Path of the model to load
+MODEL_PATH_TRAIN_LOAD = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results/2025-09-28_12-28-07/2025-09-28_20-44-37/model_2.pth' # Path of the model to load
 RESULTS_PATH = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results' # Folder where the result will be saved
 
 # PARAMETERS FOR INFERENCE
