@@ -198,7 +198,7 @@ if __name__ == "__main__":
     dataset = fetch_dataset(DATASET_NAME, DATASET_LOCATIONS, MODE, IMG_SIZE, IMG_MEAN, IMG_STD, PROB_AUGMENT)
     from common import tensor_to_image
     from utils import flow_to_image
-    sample = dataset[5000]
+    sample = dataset[100]
     im1 = tensor_to_image(sample[0], IMG_MEAN, IMG_STD)
     im2 = tensor_to_image(sample[1], IMG_MEAN, IMG_STD)
     flow = sample[2]

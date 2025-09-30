@@ -1,122 +1,202 @@
+import math
+from typing import Tuple, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# --- helpers ---
+# ----------------------------
+# Small building blocks
+# ----------------------------
 
-def normalize_feat(x, eps=1e-6):
-    # L2-normalize channel-wise to make correlation behave
-    return x / (x.norm(dim=1, keepdim=True) + eps)
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3, s=1, p=None, act=True):
+        super().__init__()
+        if p is None:
+            p = k // 2
+        self.dw = nn.Conv2d(in_ch, in_ch, k, s, p, groups=in_ch, bias=False)
+        self.pw = nn.Conv2d(in_ch, out_ch, 1, 1, 0, bias=False)
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.act = nn.SiLU(inplace=True) if act else nn.Identity()
 
-def local_correlation(f1, f2, radius=4):
+    def forward(self, x):
+        x = self.dw(x)
+        x = self.pw(x)
+        x = self.bn(x)
+        return self.act(x)
+
+class SE(nn.Module):
+    def __init__(self, ch, r=8):
+        super().__init__()
+        self.fc1 = nn.Conv2d(ch, max(1, ch // r), 1)
+        self.fc2 = nn.Conv2d(max(1, ch // r), ch, 1)
+
+    def forward(self, x):
+        s = x.mean(dim=(2, 3), keepdim=True)
+        s = F.silu(self.fc1(s))
+        s = torch.sigmoid(self.fc2(s))
+        return x * s
+
+class DSConvBlock(nn.Module):
+    def __init__(self, ch, hidden=None, num_layers=2):
+        super().__init__()
+        if hidden is None:
+            hidden = ch
+        layers = []
+        for _ in range(num_layers):
+            layers += [
+                DepthwiseSeparableConv(ch, hidden, k=3),
+                SE(hidden, r=8),
+                DepthwiseSeparableConv(hidden, ch, k=3),
+            ]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+# ----------------------------
+# Correlation (local cost volume)
+# ----------------------------
+
+def local_correlation(f1: torch.Tensor, f2: torch.Tensor, radius: int) -> torch.Tensor:
     """
-    f1,f2: [B,C,H,W] (assumed L2-normalized)
-    returns: cost volume [B,(2r+1)^2,H,W] with local correlations
+    f1, f2: (B, C, H, W)
+    Returns: (B, (2r+1)^2, H, W)
     """
     B, C, H, W = f1.shape
-    r = radius
-    # pad f2 for local shifts
-    f2p = F.pad(f2, (r, r, r, r))
-    vols = []
-    for dy in range(-r, r+1):
-        for dx in range(-r, r+1):
-            # extract shifted f2 (crop window)
-            ys, ye = dy + r, dy + r + H
-            xs, xe = dx + r, dx + r + W
-            f2s = f2p[:, :, ys:ye, xs:xe]
-            vols.append((f1 * f2s).sum(1, keepdim=True))  # inner product across C
-    vol = torch.cat(vols, dim=1) / (C**0.5)  # [B,(2r+1)^2,H,W]
-    return vol
+    k = 2 * radius + 1
+    f2_pad = F.pad(f2, (radius, radius, radius, radius))
+    patches = F.unfold(f2_pad, kernel_size=k, padding=0, stride=1)  # (B, C*k*k, H*W)
+    patches = patches.view(B, C, k * k, H, W)                        # (B, C, KK, H, W)
+    corr = (f1.unsqueeze(2) * patches).sum(dim=1)                    # (B, KK, H, W)
+    return corr / math.sqrt(C)
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
-        super().__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, k, s, p)
-        self.norm = nn.BatchNorm2d(out_ch)
-        self.act = nn.ReLU(inplace=True)
-    def forward(self, x): return self.act(self.norm(self.conv(x)))
+# ----------------------------
+# Ultra-tiny learned refiner (optional)
+# ----------------------------
 
-# --- the head ---
-
-class Dinov3FlowHead(nn.Module):
+class NanoRefine(nn.Module):
     """
-    Lightweight optical flow head for DINOv3 features.
-    Input:  f1, f2 = [B,384,40,40]  (two frames’ features)
-    Output: flow at feature res [B,2,H,W] in *feature pixels*,
-            and optionally upsampled flow in image pixels.
+    ~1–2k params residual flow touch-up. Very cheap.
     """
-    def __init__(self, img_size, in_ch=384, radius=4, hidden=128, add_coords=True):
+    def __init__(self, mid=16, dil=2):
         super().__init__()
-        self.img_size = img_size
+        self.pre = DepthwiseSeparableConv(2, mid, k=3)
+        self.dw  = nn.Conv2d(mid, mid, 3, padding=dil, dilation=dil, groups=mid, bias=False)
+        self.pw  = nn.Conv2d(mid, mid, 1, bias=False)
+        self.bn  = nn.BatchNorm2d(mid)
+        self.act = nn.SiLU(inplace=True)
+        self.out = nn.Conv2d(mid, 2, 1)
+
+    def forward(self, f):
+        x = self.pre(f)
+        x = self.act(self.bn(self.pw(self.dw(x))))
+        return f + self.out(x)
+
+# ----------------------------
+# Flow Head (clean, tiny upsampling path)
+# ----------------------------
+
+class LiteFlowHead(nn.Module):
+    """
+    Lightweight optical-flow head for two feature maps.
+    Inputs: feat1, feat2 -> (B, C, H, W)
+    Output: flow at (B, 2, out_h, out_w)
+    """
+    def __init__(
+        self,
+        out_size: Tuple[int, int] = (640, 640),
+        in_channels: int = 384,
+        proj_channels: int = 128,
+        radius: int = 4,
+        fusion_channels: int = 256,
+        fusion_layers: int = 2,
+        refinement_layers: int = 1,    # feature-scale refinement
+        use_nano_refine: bool = True, # ultra-tiny learned touch-up at full-res
+    ):
+        super().__init__()
+        self.out_size = out_size
         self.radius = radius
-        self.add_coords = add_coords
-        corr_ch = (2*radius + 1) ** 2
-        coord_ch = 2 if add_coords else 0
-        head_in = corr_ch + in_ch + coord_ch
+        self.use_nano_refine = use_nano_refine
 
-        self.stem = nn.Sequential(
-            ConvBlock(head_in, hidden),
-            ConvBlock(hidden, hidden),
-            ConvBlock(hidden, hidden),
+        # Project backbone features
+        self.proj1 = nn.Conv2d(in_channels, proj_channels, 1, bias=False)
+        self.proj2 = nn.Conv2d(in_channels, proj_channels, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(proj_channels)
+        self.bn2 = nn.BatchNorm2d(proj_channels)
+
+        cv_ch = (2 * radius + 1) ** 2
+        fuse_in = proj_channels * 3 + cv_ch
+        self.fuse_in = nn.Sequential(
+            DepthwiseSeparableConv(fuse_in, fusion_channels, k=3),
+            SE(fusion_channels, r=8),
         )
-        # a tiny refinement with residual blocks
-        self.refine = nn.Sequential(
-            ConvBlock(hidden, hidden),
-            ConvBlock(hidden, hidden),
+        self.fuse_trunk = DSConvBlock(fusion_channels, hidden=fusion_channels, num_layers=fusion_layers)
+
+        self.flow_head = nn.Sequential(
+            DepthwiseSeparableConv(fusion_channels, fusion_channels, k=3),
+            nn.Conv2d(fusion_channels, 2, 1)
         )
-        self.pred = nn.Conv2d(hidden, 2, kernel_size=3, padding=1)
 
-    @staticmethod
-    def _make_coords(B,H,W,device):
-        y,x = torch.meshgrid(
-            torch.arange(H, device=device),
-            torch.arange(W, device=device),
-            indexing='ij'
-        )
-        x = x.float().unsqueeze(0).expand(B,-1,-1)
-        y = y.float().unsqueeze(0).expand(B,-1,-1)
-        return torch.stack([x,y], dim=1)  # [B,2,H,W]
+        if refinement_layers > 0:
+            ref_in = fusion_channels + 2
+            self.refine = nn.Sequential(
+                DepthwiseSeparableConv(ref_in, fusion_channels, k=3),
+                DSConvBlock(fusion_channels, num_layers=refinement_layers),
+                nn.Conv2d(fusion_channels, 2, 1)
+            )
+        else:
+            self.refine = None
 
-    def forward(self, f1, f2):
-        """
-        f1,f2: [B,C,H,W] DINOv3 features for frame t and t+1
-        Returns:
-          flow_feat: [B,2,H,W] in *feature* pixels
-          flow_img: [B,2,H_img,W_img] in *image* pixels
-        """
-        B, C, H, W = f1.shape
-        f1n = normalize_feat(f1)
-        f2n = normalize_feat(f2)
+        self.nano = NanoRefine(mid=12) if use_nano_refine else None  # even smaller mid
 
-        corr = local_correlation(f1n, f2n, radius=self.radius)  # [B,K,H,W]
-        feats = [corr, f1]  # keep raw f1 to give appearance cues
+    def forward(self, feat1: torch.Tensor, feat2: torch.Tensor) -> torch.Tensor:
+        assert feat1.shape == feat2.shape, "feat1 and feat2 must have same shape"
+        B, C, H, W = feat1.shape
+        out_h, out_w = self.out_size
 
-        if self.add_coords:
-            coords = self._make_coords(B,H,W,f1.device)  # helps network know position
-            feats.append(coords)
+        # Projections
+        f1 = F.silu(self.bn1(self.proj1(feat1)))
+        f2 = F.silu(self.bn2(self.proj2(feat2)))
 
-        x = torch.cat(feats, dim=1)
-        x = self.stem(x) + 0  # stem features
-        x = self.refine(x) + x  # residual
-        flow_feat = self.pred(x)  # [B,2,H,W], units = feature pixels
+        # Correlation + fusion
+        corr = local_correlation(f1, f2, self.radius)
+        diff = torch.abs(f1 - f2)
+        x = torch.cat([f1, f2, diff, corr], dim=1)
+        x = self.fuse_in(x)
+        x = self.fuse_trunk(x)
 
-        H_img, W_img = self.img_size
-        # scale factor from feature map to image
-        sy = H_img / float(H)
-        sx = W_img / float(W)
-        flow_img = F.interpolate(flow_feat, size=(H_img, W_img), mode='bilinear', align_corners=True)
-        flow_img[:,0] *= sx
-        flow_img[:,1] *= sy
-        return flow_feat, flow_img
+        # Coarse flow
+        flow = self.flow_head(x)
+
+        # Optional refinement at feature scale
+        if self.refine is not None:
+            flow = flow + self.refine(torch.cat([x, flow], dim=1))
+
+        # Bilinear upsample with correct scaling (align_corners=False)
+        flow = F.interpolate(flow, size=(out_h, out_w), mode='bilinear', align_corners=False)
+        flow[:, 0] *= (out_w / W)
+        flow[:, 1] *= (out_h / H)
+
+        # Optional ultra-tiny learned touch-up
+        if self.nano is not None:
+            flow = self.nano(flow)
+
+        return flow
     
-
 if __name__ == "__main__":
-    B, C, H, W = 3, 384, 40, 40
+    B, C, H, W = 4, 384, 40, 40
     img_size = (640, 640)
-    f1 = torch.randn(B, C, H, W)  # DINOv3 feat at t
-    f2 = torch.randn(B, C, H, W)  # DINOv3 feat at t+1
+    f1 = torch.randn(B, C, H, W).to("cuda")  # DINOv3 feat at t
+    f2 = torch.randn(B, C, H, W).to("cuda")  # DINOv3 feat at t+1
 
-    of_head = Dinov3FlowHead(img_size, in_ch=C, radius=4, hidden=128, add_coords=True)
+    of_head = LiteFlowHead(out_size = img_size, 
+                           in_channels = 384,
+                            proj_channels = 256,
+                            radius = 4,                 # local search radius (2r+1)^2 cost channels
+                            fusion_channels = 448,      # width of fusion trunk
+                            fusion_layers = 3,          # depth in DSConv blocks
+                            refinement_layers = 2).to("cuda")      # extra refinement after initial flow)
 
     # ----------------- Utility: parameter counting -----------------
     def count_parameters(module: nn.Module) -> int:
@@ -126,5 +206,5 @@ if __name__ == "__main__":
     print('Depth params: ', count_parameters(of_head))
 
 
-    flow_feat, flow_img = of_head(f1, f2)  # if your image is 320×320
+    flow_img = of_head(f1, f2)  # if your image is 320×320
     print(flow_img.shape)
