@@ -6,7 +6,7 @@ DATASET_LOCATIONS = {
 }
 IMG_SIZE = (640, 640) # Size of the image
 PATCH_SIZE = 16 # Patch size for the transformer embeddings
-PROB_AUGMENT_TRAINING = 0.95 # Probability to perform photogrametric augmentation in training
+PROB_AUGMENT_TRAINING = 0.0 # Probability to perform photogrametric augmentation in training
 PROB_AUGMENT_VALID = 0.0 # Probability to perform photogrametric augmentation in validation
 IMG_MEAN = [0.485, 0.456, 0.406] # Mean of the image that the backbone (e.g. ResNet) expects
 IMG_STD = [0.229, 0.224, 0.225] # Std of the image that the backbone (e.g. ResNet) expects
@@ -31,20 +31,27 @@ MODEL_TO_EMBED_DIM = { # Mapping from model type to embedding dimension
     "dinov3_vith16plus": 1280,
     "dinov3_vit7b16": 4096,
 }
+PROJ_CHANNELS = 256
+RADIUS = 4
+FUSION_CHANNELS = 320
+FUSION_LAYERS = 3
+CONVEX_UP = 16
+REFINEMENT_LAYERS = 2
 
 # TRAINING PARAMETERS
 BATCH_SIZE = 8 # Batch size
 
-LEARNING_RATE = 0.0001 # Learning rate
+LEARNING_RATE = 0.00001 # Learning rate
 WEIGHT_DECAY = 0.0001 # Weight decay for regularization
 NUM_EPOCHS = 100 # Number of epochs
 NUM_SAMPLES_PLOT = 3 # Number of samples to plot during training or validation
 
 LOAD_MODEL = True # Whether to load an existing model for training
 SAVE_MODEL = True # Whether to save the result from the training
-MODEL_PATH_TRAIN_LOAD = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results/2025-09-28_12-28-07/2025-09-28_20-44-37/model_2.pth' # Path of the model to load
-RESULTS_PATH = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results' # Folder where the result will be saved
+MODEL_PATH_TRAIN_LOAD = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results/2025-10-04_18-54-29/2025-10-05_01-08-42/model_14.pth' # Path of the model to load
+RESULTS_PATH = '/home/rafa/deep_learning/projects/optical_flow_dinov3/results/2025-10-04_18-54-29' # Folder where the result will be saved
 
 # PARAMETERS FOR INFERENCE
-MODEL_PATH_INFERENCE = '/home/rafa/deep_learning/projects/depth_dinov3/weights/model.pth' # Path of the model to perform inference
-IMG_INFERENCE_PATH = '/home/rafa/deep_learning/datasets/COCO/val2017/000000000139.jpg' # Image to perform inference
+MODEL_PATH_INFERENCE = '/home/rafa/deep_learning/projects/optical_flow_dinov3/weights/model.pth' # Path of the model to perform inference
+IMG_INFERENCE_PATH_1 = '/home/rafa/deep_learning/datasets/FlyingThings3D_subset/val/image_clean/left/0000000.png' # Path of the first image to perform inference
+IMG_INFERENCE_PATH_2 = '/home/rafa/deep_learning/datasets/FlyingThings3D_subset/val/image_clean/left/0000001.png' # Path of the second image to perform inference

@@ -71,27 +71,92 @@ def local_correlation(f1: torch.Tensor, f2: torch.Tensor, radius: int) -> torch.
     corr = (f1.unsqueeze(2) * patches).sum(dim=1)                    # (B, KK, H, W)
     return corr / math.sqrt(C)
 
-# ----------------------------
-# Ultra-tiny learned refiner (optional)
-# ----------------------------
 
-class NanoRefine(nn.Module):
+
+    
+class ConvexUpsampler(nn.Module):
     """
-    ~1–2k params residual flow touch-up. Very cheap.
+    RAFT-style convex upsampler.
+    Given a low-res flow (B,2,H,W) and features (B,C,H,W),
+    predicts a mask (B, 9*up*up, H, W) and upsamples flow to (B,2,H*up,W*up).
     """
-    def __init__(self, mid=16, dil=2):
+    def __init__(self, in_ch: int, up: int):
         super().__init__()
-        self.pre = DepthwiseSeparableConv(2, mid, k=3)
-        self.dw  = nn.Conv2d(mid, mid, 3, padding=dil, dilation=dil, groups=mid, bias=False)
-        self.pw  = nn.Conv2d(mid, mid, 1, bias=False)
-        self.bn  = nn.BatchNorm2d(mid)
-        self.act = nn.SiLU(inplace=True)
-        self.out = nn.Conv2d(mid, 2, 1)
+        self.up = up
+        # a tiny head is enough; feel free to make this deeper if you like
+        self.mask_head = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, (up * up) * 9, 1)
+        )
 
-    def forward(self, f):
-        x = self.pre(f)
-        x = self.act(self.bn(self.pw(self.dw(x))))
-        return f + self.out(x)
+    def forward(self, flow_lr: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
+        """
+        flow_lr: (B,2,H,W), feat: (B,C,H,W) at the SAME (H,W)
+        returns flow_hr: (B,2,H*up,W*up)
+        """
+        B, _, H, W = flow_lr.shape
+        up = self.up
+
+        # predict mask and normalize over the 3x3 neighborhood
+        mask = self.mask_head(feat)                              # (B, 9*up*up, H, W)
+        mask = mask.view(B, 1, 9, up, up, H, W)
+        mask = torch.softmax(mask, dim=2)                        # softmax across 9 neighbors
+
+        # extract 3x3 patches from low-res flow
+        flow_unf = F.unfold(flow_lr, kernel_size=3, padding=1)   # (B, 2*9, H*W)
+        flow_unf = flow_unf.view(B, 2, 9, 1, 1, H, W)            # (B, 2, 9, 1, 1, H, W)
+
+        # convex combination
+        up_flow = torch.sum(mask * flow_unf, dim=2)              # (B, 2, up, up, H, W)
+        up_flow = up_flow.permute(0, 1, 4, 2, 5, 3).contiguous() # (B, 2, H, up, W, up)
+        up_flow = up_flow.view(B, 2, H * up, W * up)             # (B, 2, H*up, W*up)
+
+        # IMPORTANT: scale by up to preserve flow units
+        up_flow = up_flow * up
+        return up_flow
+    
+class ConvexUpsampler(nn.Module):
+    """
+    RAFT-style convex upsampler.
+    Given a low-res flow (B,2,H,W) and features (B,C,H,W),
+    predicts a mask (B, 9*up*up, H, W) and upsamples flow to (B,2,H*up,W*up).
+    """
+    def __init__(self, in_ch: int, up: int):
+        super().__init__()
+        self.up = up
+        # a tiny head is enough; feel free to make this deeper if you like
+        self.mask_head = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, (up * up) * 9, 1)
+        )
+
+    def forward(self, flow_lr: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
+        """
+        flow_lr: (B,2,H,W), feat: (B,C,H,W) at the SAME (H,W)
+        returns flow_hr: (B,2,H*up,W*up)
+        """
+        B, _, H, W = flow_lr.shape
+        up = self.up
+
+        # predict mask and normalize over the 3x3 neighborhood
+        mask = self.mask_head(feat)                              # (B, 9*up*up, H, W)
+        mask = mask.view(B, 1, 9, up, up, H, W)
+        mask = torch.softmax(mask, dim=2)                        # softmax across 9 neighbors
+
+        # extract 3x3 patches from low-res flow
+        flow_unf = F.unfold(flow_lr, kernel_size=3, padding=1)   # (B, 2*9, H*W)
+        flow_unf = flow_unf.view(B, 2, 9, 1, 1, H, W)            # (B, 2, 9, 1, 1, H, W)
+
+        # convex combination
+        up_flow = torch.sum(mask * flow_unf, dim=2)              # (B, 2, up, up, H, W)
+        up_flow = up_flow.permute(0, 1, 4, 2, 5, 3).contiguous() # (B, 2, H, up, W, up)
+        up_flow = up_flow.view(B, 2, H * up, W * up)             # (B, 2, H*up, W*up)
+
+        # IMPORTANT: scale by up to preserve flow units
+        up_flow = up_flow * up
+        return up_flow
 
 # ----------------------------
 # Flow Head (clean, tiny upsampling path)
@@ -111,13 +176,12 @@ class LiteFlowHead(nn.Module):
         radius: int = 4,
         fusion_channels: int = 256,
         fusion_layers: int = 2,
+        convex_up: int = 16,
         refinement_layers: int = 1,    # feature-scale refinement
-        use_nano_refine: bool = True, # ultra-tiny learned touch-up at full-res
     ):
         super().__init__()
         self.out_size = out_size
         self.radius = radius
-        self.use_nano_refine = use_nano_refine
 
         # Project backbone features
         self.proj1 = nn.Conv2d(in_channels, proj_channels, 1, bias=False)
@@ -148,39 +212,41 @@ class LiteFlowHead(nn.Module):
         else:
             self.refine = None
 
-        self.nano = NanoRefine(mid=12) if use_nano_refine else None  # even smaller mid
+        self.convex_upsampler = ConvexUpsampler(fusion_channels, up=convex_up)
+
 
     def forward(self, feat1: torch.Tensor, feat2: torch.Tensor) -> torch.Tensor:
         assert feat1.shape == feat2.shape, "feat1 and feat2 must have same shape"
         B, C, H, W = feat1.shape
         out_h, out_w = self.out_size
 
-        # Projections
         f1 = F.silu(self.bn1(self.proj1(feat1)))
         f2 = F.silu(self.bn2(self.proj2(feat2)))
 
-        # Correlation + fusion
         corr = local_correlation(f1, f2, self.radius)
         diff = torch.abs(f1 - f2)
         x = torch.cat([f1, f2, diff, corr], dim=1)
         x = self.fuse_in(x)
         x = self.fuse_trunk(x)
 
-        # Coarse flow
+        # coarse flow at feature scale
         flow = self.flow_head(x)
 
-        # Optional refinement at feature scale
+        # optional refinement at feature scale (still low-res)
         if self.refine is not None:
             flow = flow + self.refine(torch.cat([x, flow], dim=1))
 
-        # Bilinear upsample with correct scaling (align_corners=False)
-        flow = F.interpolate(flow, size=(out_h, out_w), mode='bilinear', align_corners=False)
-        flow[:, 0] *= (out_w / W)
-        flow[:, 1] *= (out_h / H)
+        # Upsample with convex upsampler
+        flow = self.convex_upsampler(flow, x)  # now ~16x; matches out_h/out_w if multiples
 
-        # Optional ultra-tiny learned touch-up
-        if self.nano is not None:
-            flow = self.nano(flow)
+        # if output size differs a bit, small resize with correct scaling
+        out_h, out_w = self.out_size
+        B, _, Hf, Wf = flow.shape
+        if (Hf, Wf) != (out_h, out_w):
+            sx, sy = out_w / Wf, out_h / Hf
+            flow[:,0] *= sx
+            flow[:,1] *= sy
+            flow = F.interpolate(flow, size=(out_h, out_w), mode='bilinear', align_corners=False)
 
         return flow
     
@@ -189,22 +255,23 @@ if __name__ == "__main__":
     img_size = (640, 640)
     f1 = torch.randn(B, C, H, W).to("cuda")  # DINOv3 feat at t
     f2 = torch.randn(B, C, H, W).to("cuda")  # DINOv3 feat at t+1
-
-    of_head = LiteFlowHead(out_size = img_size, 
-                           in_channels = 384,
-                            proj_channels = 256,
-                            radius = 4,                 # local search radius (2r+1)^2 cost channels
-                            fusion_channels = 448,      # width of fusion trunk
-                            fusion_layers = 3,          # depth in DSConv blocks
-                            refinement_layers = 2).to("cuda")      # extra refinement after initial flow)
+    
+    of_head = LiteFlowHead(out_size = (640, 640),
+        in_channels= 384,
+        proj_channels = 256,
+        radius= 4,
+        fusion_channels = 320,
+        fusion_layers = 3,
+        convex_up = 16,
+        refinement_layers = 2).to("cuda")
 
     # ----------------- Utility: parameter counting -----------------
     def count_parameters(module: nn.Module) -> int:
         return sum(p.numel() for p in module.parameters() if p.requires_grad)
     
     # Print parameter counts
-    print('Depth params: ', count_parameters(of_head))
+    print('Optical flow params: ', count_parameters(of_head))
 
 
-    flow_img = of_head(f1, f2)  # if your image is 320×320
+    flow_img = of_head(f1, f2)
     print(flow_img.shape)

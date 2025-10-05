@@ -16,17 +16,6 @@ from src.frame_utils import read_gen
 from src.dataset_augmentor import FlowAugmentor
 from src.common import image_to_tensor
 
-def check_nan(name, arr):
-    if isinstance(arr, np.ndarray):
-        if np.isnan(arr).any():
-            print(f"{name} has NaNs")
-            return True
-    elif torch.is_tensor(arr):
-        if torch.isnan(arr).any():
-            print(f"{name} has NaNs")
-            return True
-    return False
-
 class FlowDataset(data.Dataset):
     def __init__(self, img_size, img_mean, img_std, aug_params=None):
         self.img_size = img_size
@@ -58,10 +47,6 @@ class FlowDataset(data.Dataset):
 
         flow = read_gen(self.flow_list[index])
 
-        # After loading flow
-        if check_nan("flow initial", flow):
-            print("Index NaN: ", index)
-
         img1 = read_gen(self.image_list[index][0])
         img2 = read_gen(self.image_list[index][1])
 
@@ -85,19 +70,16 @@ class FlowDataset(data.Dataset):
         sx, sy = Wt / W, Ht / H
         flow[..., 0] *= sx
         flow[..., 1] *= sy
-        check_nan("flow after resize", flow)
 
         # Apply augmentor
         if self.augmentor is not None and np.random.rand() < self.prob_augment:
             img1, img2, flow = self.augmentor(img1, img2, flow)
 
-        check_nan("flow after augmentor", flow)
 
         img1 = image_to_tensor(img1, self.img_mean, self.img_std)
         img2 = image_to_tensor(img2, self.img_mean, self.img_std)
 
         flow = torch.from_numpy(flow).permute(2, 0, 1).float()
-        check_nan("flow tensor", flow)
 
         if valid is not None:
             valid = torch.from_numpy(valid)
