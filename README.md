@@ -104,7 +104,7 @@ Any modification or extension of this repository should maintain these files and
 
 ## Demo
 
-<img src="assets/gif_optical_flow.gif" height="800">
+<img src="assets/optical_flow.gif" height="800">
 
 ## License
 - Code in this repo: Apache-2.0.

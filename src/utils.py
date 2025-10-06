@@ -106,27 +106,46 @@ def flow_uv_to_colors(u, v, convert_to_bgr=False):
     return flow_image
 
 
-def flow_to_image(flow_uv, clip_flow=None, convert_to_bgr=False):
+def flow_to_image(flow_uv, clip_flow_max=None, clip_flow_min=None, convert_to_bgr=False, fixed_scale=None):
     """
-    Expects a two dimensional flow image of shape.
+    Visualize optical flow with optional min/max clipping.
 
     Args:
-        flow_uv (np.ndarray): Flow UV image of shape [H,W,2]
-        clip_flow (float, optional): Clip maximum of flow values. Defaults to None.
-        convert_to_bgr (bool, optional): Convert output image to BGR. Defaults to False.
-
-    Returns:
-        np.ndarray: Flow visualization image of shape [H,W,3]
+        flow_uv (np.ndarray): [H, W, 2]
+        clip_flow_max (float, optional): maximum absolute flow value to clip
+        clip_flow_min (float, optional): minimum magnitude below which flow is zeroed
+        convert_to_bgr (bool): output BGR for OpenCV
+        fixed_scale (float, optional): fixed normalization denominator
     """
-    assert flow_uv.ndim == 3, 'input flow must have three dimensions'
-    assert flow_uv.shape[2] == 2, 'input flow must have shape [H,W,2]'
-    if clip_flow is not None:
-        flow_uv = np.clip(flow_uv, 0, clip_flow)
-    u = flow_uv[:,:,0]
-    v = flow_uv[:,:,1]
-    rad = np.sqrt(np.square(u) + np.square(v))
-    rad_max = np.max(rad)
-    epsilon = 1e-5
-    u = u / (rad_max + epsilon)
-    v = v / (rad_max + epsilon)
+    assert flow_uv.ndim == 3 and flow_uv.shape[2] == 2
+
+    u = np.where(np.isfinite(flow_uv[:, :, 0]), flow_uv[:, :, 0], 0.0)
+    v = np.where(np.isfinite(flow_uv[:, :, 1]), flow_uv[:, :, 1], 0.0)
+
+    # Clip symmetrically
+    if clip_flow_max is not None:
+        u = np.clip(u, -clip_flow_max, clip_flow_max)
+        v = np.clip(v, -clip_flow_max, clip_flow_max)
+
+    # Compute magnitude
+    rad = np.sqrt(u**2 + v**2)
+
+    # Zero-out small motions (below clip_flow_min)
+    if clip_flow_min is not None:
+        mask_small = rad < clip_flow_min
+        u[mask_small] = 0.0
+        v[mask_small] = 0.0
+        rad[mask_small] = 0.0
+
+    # Normalization
+    if fixed_scale is not None:
+        denom = fixed_scale
+    elif clip_flow_max is not None:
+        denom = clip_flow_max
+    else:
+        denom = np.max(rad) if np.max(rad) > 0 else 1.0
+
+    u /= (denom + 1e-5)
+    v /= (denom + 1e-5)
+
     return flow_uv_to_colors(u, v, convert_to_bgr)
