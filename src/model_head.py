@@ -70,51 +70,6 @@ def local_correlation(f1: torch.Tensor, f2: torch.Tensor, radius: int) -> torch.
     patches = patches.view(B, C, k * k, H, W)                        # (B, C, KK, H, W)
     corr = (f1.unsqueeze(2) * patches).sum(dim=1)                    # (B, KK, H, W)
     return corr / math.sqrt(C)
-
-
-
-    
-class ConvexUpsampler(nn.Module):
-    """
-    RAFT-style convex upsampler.
-    Given a low-res flow (B,2,H,W) and features (B,C,H,W),
-    predicts a mask (B, 9*up*up, H, W) and upsamples flow to (B,2,H*up,W*up).
-    """
-    def __init__(self, in_ch: int, up: int):
-        super().__init__()
-        self.up = up
-        # a tiny head is enough; feel free to make this deeper if you like
-        self.mask_head = nn.Sequential(
-            nn.Conv2d(in_ch, in_ch, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_ch, (up * up) * 9, 1)
-        )
-
-    def forward(self, flow_lr: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
-        """
-        flow_lr: (B,2,H,W), feat: (B,C,H,W) at the SAME (H,W)
-        returns flow_hr: (B,2,H*up,W*up)
-        """
-        B, _, H, W = flow_lr.shape
-        up = self.up
-
-        # predict mask and normalize over the 3x3 neighborhood
-        mask = self.mask_head(feat)                              # (B, 9*up*up, H, W)
-        mask = mask.view(B, 1, 9, up, up, H, W)
-        mask = torch.softmax(mask, dim=2)                        # softmax across 9 neighbors
-
-        # extract 3x3 patches from low-res flow
-        flow_unf = F.unfold(flow_lr, kernel_size=3, padding=1)   # (B, 2*9, H*W)
-        flow_unf = flow_unf.view(B, 2, 9, 1, 1, H, W)            # (B, 2, 9, 1, 1, H, W)
-
-        # convex combination
-        up_flow = torch.sum(mask * flow_unf, dim=2)              # (B, 2, up, up, H, W)
-        up_flow = up_flow.permute(0, 1, 4, 2, 5, 3).contiguous() # (B, 2, H, up, W, up)
-        up_flow = up_flow.view(B, 2, H * up, W * up)             # (B, 2, H*up, W*up)
-
-        # IMPORTANT: scale by up to preserve flow units
-        up_flow = up_flow * up
-        return up_flow
     
 class ConvexUpsampler(nn.Module):
     """
