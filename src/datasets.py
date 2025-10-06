@@ -189,24 +189,14 @@ if __name__ == "__main__":
     flow_image = flow_to_image(flow.permute(1,2,0).cpu().numpy())
 
     import matplotlib.pyplot as plt
-    from check_flow import photometric_check_v2
-
-    err, cov, img2_w = photometric_check_v2(torch.from_numpy(im1).permute(2,0,1), torch.from_numpy(im2).permute(2,0,1), flow, valid_mask=valid.unsqueeze(0))
-    print(f"Photometric L1: {err:.4f}, coverage: {cov*100:.1f}%")
 
     # img1
     plt.figure()
     plt.imshow(im1)
-    plt.title("img1 orig")
+    plt.title("img1")
     plt.axis('off')
     plt.tight_layout()
 
-    # img2 warped
-    plt.figure()
-    plt.imshow(img2_w.squeeze(0).permute(1,2,0).cpu().numpy())
-    plt.title("img2 warped")
-    plt.axis('off')
-    plt.tight_layout()
 
     # img2
     plt.figure()
